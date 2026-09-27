@@ -44,7 +44,8 @@ jobs:
           [[ "$RUN_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
 
           if [[ ! "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
-            PR_NUMBER="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RUN_HEAD_SHA/pulls"               --jq '[.[] | select(.base.repo.full_name == env.GITHUB_REPOSITORY and .head.sha == env.RUN_HEAD_SHA)] | sort_by(.number) | last | .number // empty')"
+            PRS_JSON="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RUN_HEAD_SHA/pulls")"
+            PR_NUMBER="$(jq -r --arg repo "$GITHUB_REPOSITORY" --arg sha "$RUN_HEAD_SHA"               '[.[] | select(.base.repo.full_name == $repo and .head.sha == $sha)] | sort_by(.number) | last | .number // empty'               <<<"$PRS_JSON")"
           fi
 
           [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]
