@@ -19,6 +19,8 @@ permissions:
   actions: read
   pull-requests: write
   issues: write
+  pages: write
+  id-token: write
 
 jobs:
   resolve:
@@ -50,9 +52,6 @@ jobs:
           echo "merge_base=$MERGE_BASE" >> "$GITHUB_OUTPUT"
           echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
           echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
-          echo "BASE tip:   $BASE_SHA"
-          echo "Merge-base: $MERGE_BASE"
-          echo "HEAD:       $HEAD_SHA"
 
   build-base:
     name: Build BASE with spec-prod
@@ -60,8 +59,7 @@ jobs:
     needs: resolve
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout merge-base
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: ${{ needs.resolve.outputs.merge_base }}
 
@@ -82,8 +80,7 @@ jobs:
     needs: resolve
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout PR HEAD
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: ${{ needs.resolve.outputs.head_sha }}
 
@@ -110,10 +107,9 @@ jobs:
       PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
       HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
       MERGE_BASE: ${{ needs.resolve.outputs.merge_base }}
-      SITE_ORIGIN: https://simoneonofri.github.io/threat-modeling-guide
       GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Checkout persistent Pages branch
+      - name: Checkout persistent Pages archive
         uses: actions/checkout@v4
         with:
           ref: gh-pages
@@ -132,14 +128,14 @@ jobs:
           name: pr-preview-2-head-${{ github.event.pull_request.number }}
           path: build/head
 
-      - name: Publish immutable snapshot and latest
-        id: stage1
+      - name: Assemble immutable snapshot and latest
+        id: assemble
         shell: bash
         run: |
           set -euo pipefail
           PREFIX="pr-preview/$PR_NUMBER"
           SNAPSHOT="$PREFIX/$HEAD_SHA"
-          ROOT_BEFORE="$(git -C pages hash-object index.html)"
+          ROOT_BLOB_BEFORE="$(git -C pages hash-object index.html)"
 
           rm -rf "pages/$SNAPSHOT"
           mkdir -p "pages/$SNAPSHOT/base" "pages/$SNAPSHOT/head"
@@ -167,57 +163,67 @@ jobs:
           test -f "pages/$SNAPSHOT/base/images/minimalist-web-threat-model.png"
           test -f "pages/$SNAPSHOT/head/images/minimalist-web-threat-model.png"
 
-          ROOT_AFTER="$(git -C pages hash-object index.html)"
-          test "$ROOT_BEFORE" = "$ROOT_AFTER"
+          ROOT_BLOB_AFTER="$(git -C pages hash-object index.html)"
+          test "$ROOT_BLOB_BEFORE" = "$ROOT_BLOB_AFTER"
+          echo "root_blob=$ROOT_BLOB_AFTER" >> "$GITHUB_OUTPUT"
 
           git -C pages config user.name "github-actions[bot]"
           git -C pages config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git -C pages add -- "$PREFIX"
 
-          if git -C pages diff --cached --quiet; then
-            echo "No stage-1 changes to publish."
-          else
-            if git -C pages diff --cached --name-only | grep -Ev "^pr-preview/$PR_NUMBER/" >/dev/null; then
-              echo "Refusing to modify anything outside pr-preview/$PR_NUMBER/" >&2
-              exit 1
-            fi
+          if git -C pages diff --cached --name-only | grep -Ev "^pr-preview/$PR_NUMBER/" >/dev/null; then
+            echo "Refusing to modify anything outside pr-preview/$PR_NUMBER/" >&2
+            exit 1
+          fi
+
+          if ! git -C pages diff --cached --quiet; then
             git -C pages commit -m "Preview PR #$PR_NUMBER at ${HEAD_SHA:0:12}"
             git -C pages push origin gh-pages
           fi
 
-          echo "snapshot_url=$SITE_ORIGIN/$SNAPSHOT/" >> "$GITHUB_OUTPUT"
-          echo "latest_url=$SITE_ORIGIN/$PREFIX/latest/" >> "$GITHUB_OUTPUT"
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
 
-      - name: Wait for BASE and HEAD on Pages
+      - name: Upload stage-1 site
+        uses: actions/upload-pages-artifact@v4
+        with:
+          name: pr-preview-2-stage1-${{ github.event.pull_request.number }}
+          path: pages
+          retention-days: 1
+
+      - name: Deploy stage-1 site
+        id: deploy_stage1
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: pr-preview-2-stage1-${{ github.event.pull_request.number }}
+
+      - name: Wait for BASE and HEAD
+        id: urls
         shell: bash
         env:
-          SNAPSHOT_URL: ${{ steps.stage1.outputs.snapshot_url }}
+          PAGE_URL: ${{ steps.deploy_stage1.outputs.page_url }}
         run: |
           set -euo pipefail
+          SNAPSHOT_URL="${PAGE_URL%/}/pr-preview/$PR_NUMBER/$HEAD_SHA/"
+          LATEST_URL="${PAGE_URL%/}/pr-preview/$PR_NUMBER/latest/"
           for path in base/index.html head/index.html; do
             url="${SNAPSHOT_URL%/}/$path"
-            ok=0
-            for attempt in {1..30}; do
-              if curl --fail --silent --show-error --location "$url" -o /dev/null; then
-                ok=1
-                break
-              fi
-              sleep 4
-            done
-            test "$ok" = 1
+            curl --fail --show-error --location --retry 15 --retry-delay 2 "$url" -o /dev/null
           done
+          echo "snapshot_url=$SNAPSHOT_URL" >> "$GITHUB_OUTPUT"
+          echo "latest_url=$LATEST_URL" >> "$GITHUB_OUTPUT"
 
-      - name: Generate W3C HTML Diff and finalize snapshot
+      - name: Generate W3C HTML Diff and finalize archive
         shell: bash
         env:
-          SNAPSHOT_URL: ${{ steps.stage1.outputs.snapshot_url }}
+          SNAPSHOT_URL: ${{ steps.urls.outputs.snapshot_url }}
         run: |
           set -euo pipefail
           PREFIX="pr-preview/$PR_NUMBER"
           SNAPSHOT="$PREFIX/$HEAD_SHA"
           BASE_URL="${SNAPSHOT_URL%/}/base/index.html"
           HEAD_URL="${SNAPSHOT_URL%/}/head/index.html"
-          ROOT_BEFORE="$(git -C pages hash-object index.html)"
+          ROOT_BLOB_BEFORE="$(git -C pages hash-object index.html)"
 
           DIFF_URL="$(python3 - "$BASE_URL" "$HEAD_URL" <<'PY'
           import sys
@@ -239,15 +245,17 @@ jobs:
           import sys
           p = Path(sys.argv[1])
           s = p.read_text()
-          s = s.replace("</ul>", '  <li><a href="./diff/index.html">DIFF</a></li>\n</ul>')
+          if "./diff/index.html" not in s:
+              s = s.replace("</ul>", '  <li><a href="./diff/index.html">DIFF</a></li>\n</ul>')
           p.write_text(s)
           PY
 
           rm -rf "pages/$PREFIX/latest"
           cp -a "pages/$SNAPSHOT" "pages/$PREFIX/latest"
 
-          ROOT_AFTER="$(git -C pages hash-object index.html)"
-          test "$ROOT_BEFORE" = "$ROOT_AFTER"
+          ROOT_BLOB_AFTER="$(git -C pages hash-object index.html)"
+          test "$ROOT_BLOB_BEFORE" = "$ROOT_BLOB_AFTER"
+          test "$ROOT_BLOB_AFTER" = "${{ steps.assemble.outputs.root_blob }}"
 
           git -C pages add -- "$PREFIX"
           if git -C pages diff --cached --name-only | grep -Ev "^pr-preview/$PR_NUMBER/" >/dev/null; then
@@ -259,37 +267,51 @@ jobs:
             git -C pages push origin gh-pages
           fi
 
-      - name: Verify published snapshot
+      - name: Upload final site
+        uses: actions/upload-pages-artifact@v4
+        with:
+          name: pr-preview-2-final-${{ github.event.pull_request.number }}
+          path: pages
+          retention-days: 1
+
+      - name: Deploy final site
+        id: deploy_final
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: pr-preview-2-final-${{ github.event.pull_request.number }}
+
+      - name: Verify published snapshot and unchanged root
         shell: bash
         env:
-          SNAPSHOT_URL: ${{ steps.stage1.outputs.snapshot_url }}
-          LATEST_URL: ${{ steps.stage1.outputs.latest_url }}
+          PAGE_URL: ${{ steps.deploy_final.outputs.page_url }}
         run: |
           set -euo pipefail
+          SNAPSHOT_URL="${PAGE_URL%/}/pr-preview/$PR_NUMBER/$HEAD_SHA/"
+          LATEST_URL="${PAGE_URL%/}/pr-preview/$PR_NUMBER/latest/"
+          test "$(git -C pages hash-object index.html)" = "${{ steps.assemble.outputs.root_blob }}"
+
           for base in "$SNAPSHOT_URL" "$LATEST_URL"; do
-            for path in               ""               "base/index.html"               "head/index.html"               "diff/index.html"               "head/images/minimalist-web-threat-model.png"
-            do
-              url="${base%/}/$path"
-              echo "Checking $url"
-              curl --fail --show-error --location --retry 10 --retry-delay 3 "$url" -o /dev/null
+            for path in "" base/index.html head/index.html diff/index.html head/images/minimalist-web-threat-model.png; do
+              curl --fail --show-error --location --retry 10 --retry-delay 2 "${base%/}/$path" -o /dev/null
             done
           done
 
       - name: Create or update PR Preview 2 comment
         shell: bash
         env:
-          LATEST_URL: ${{ steps.stage1.outputs.latest_url }}
-          SNAPSHOT_URL: ${{ steps.stage1.outputs.snapshot_url }}
+          PAGE_URL: ${{ steps.deploy_final.outputs.page_url }}
         run: |
           set -euo pipefail
+          LATEST_URL="${PAGE_URL%/}/pr-preview/$PR_NUMBER/latest"
+          SNAPSHOT_URL="${PAGE_URL%/}/pr-preview/$PR_NUMBER/$HEAD_SHA"
           MARKER="<!-- pr-preview-2 -->"
           BODY="$MARKER
           **PR Preview 2**
           
-          - [Preview](${LATEST_URL%/}/head/index.html)
-          - [Diff](${LATEST_URL%/}/diff/index.html)
-          - [BASE](${LATEST_URL%/}/base/index.html)
-          - [Immutable snapshot]($SNAPSHOT_URL)
+          - [Preview]($LATEST_URL/head/index.html)
+          - [Diff]($LATEST_URL/diff/index.html)
+          - [BASE]($LATEST_URL/base/index.html)
+          - [Immutable snapshot]($SNAPSHOT_URL/)
           
           HEAD: \`$HEAD_SHA\`  
           Merge-base: \`$MERGE_BASE\`"
@@ -308,9 +330,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
-      GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Checkout persistent Pages branch
+      - name: Checkout persistent Pages archive
         uses: actions/checkout@v4
         with:
           ref: gh-pages
@@ -318,11 +339,12 @@ jobs:
           fetch-depth: 0
 
       - name: Remove only this PR preview
+        id: cleanup
         shell: bash
         run: |
           set -euo pipefail
           PREFIX="pr-preview/$PR_NUMBER"
-          ROOT_BEFORE="$(git -C pages hash-object index.html)"
+          ROOT_BLOB_BEFORE="$(git -C pages hash-object index.html)"
 
           if [ -d "pages/$PREFIX" ]; then
             rm -rf "pages/$PREFIX"
@@ -330,8 +352,8 @@ jobs:
             git -C pages config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git -C pages add -A -- "$PREFIX"
 
-            ROOT_AFTER="$(git -C pages hash-object index.html)"
-            test "$ROOT_BEFORE" = "$ROOT_AFTER"
+            ROOT_BLOB_AFTER="$(git -C pages hash-object index.html)"
+            test "$ROOT_BLOB_BEFORE" = "$ROOT_BLOB_AFTER"
 
             if git -C pages diff --cached --name-only | grep -Ev "^pr-preview/$PR_NUMBER/" >/dev/null; then
               echo "Refusing to modify anything outside pr-preview/$PR_NUMBER/" >&2
@@ -343,3 +365,18 @@ jobs:
               git -C pages push origin gh-pages
             fi
           fi
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload cleaned site
+        uses: actions/upload-pages-artifact@v4
+        with:
+          name: pr-preview-2-cleanup-${{ github.event.pull_request.number }}
+          path: pages
+          retention-days: 1
+
+      - name: Deploy cleaned site
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: pr-preview-2-cleanup-${{ github.event.pull_request.number }}
