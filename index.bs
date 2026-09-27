@@ -2484,4 +2484,4 @@ helps that decision [[SHOSTACK-RISK-TM]].
 
 ## PR Preview 2 PoC Test {#pr-preview-2-poc-test}
 
-This temporary section exists only in the `simoneonofri` proof-of-concept branch to verify PR-scoped preview history and cleanup.
+This temporary section exists only in the `simoneonofri` proof-of-concept branch to verify PR-scoped preview history and cleanup. This second revision verifies immutable history plus `latest`.
