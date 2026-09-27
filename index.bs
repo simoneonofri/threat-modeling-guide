@@ -2480,3 +2480,8 @@ helps that decision [[SHOSTACK-RISK-TM]].
 * [Fingerprinting Guidance](https://w3c.github.io/fingerprinting-guidance/)
 * [Security Guidance on Cryptography](https://w3c.github.io/security-guidelines-cryptography/)
 * [File Format Threats Mnemonics](https://github.com/w3c-cg/threat-modeling/blob/main/models/file-formats.md)
+
+
+## PR Preview 2 Alpha 2 Cleanup Check {#pr-preview-2-alpha2-cleanup-check}
+
+Temporary cleanup verification for the packaged PR Preview 2 alpha.2.
