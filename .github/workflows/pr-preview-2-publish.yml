@@ -352,7 +352,19 @@ jobs:
           fi
           if ! git -C pages diff --cached --quiet; then
             git -C pages commit -m "Add diff for PR #$PR_NUMBER at ${HEAD_SHA:0:12}"
-            git -C pages push origin HEAD:gh-pages
+
+            for attempt in 1 2 3; do
+              if git -C pages push origin HEAD:gh-pages; then
+                break
+              fi
+              echo "Diff push attempt $attempt failed; rebasing on current gh-pages"
+              git -C pages fetch origin gh-pages
+              git -C pages rebase origin/gh-pages
+            done
+
+            if ! git -C pages merge-base --is-ancestor HEAD origin/gh-pages 2>/dev/null; then
+              git -C pages fetch origin gh-pages
+            fi
           fi
 
       - name: Refresh archive after optional diff
@@ -390,14 +402,26 @@ jobs:
           SNAPSHOT_URL="${PAGE_URL%/}/pr-preview/$PR_NUMBER/$HEAD_SHA/"
           LATEST_URL="${PAGE_URL%/}/pr-preview/$PR_NUMBER/latest/"
 
+          wait_url() {
+            url="$1"
+            for attempt in {1..30}; do
+              if curl --fail --silent --show-error --location "$url" -o /dev/null; then
+                return 0
+              fi
+              sleep 2
+            done
+            echo "Timed out waiting for $url" >&2
+            return 1
+          }
+
           for base in "$SNAPSHOT_URL" "$LATEST_URL"; do
             for path in "" base/index.html head/index.html; do
-              curl --fail --show-error --location --retry 10 --retry-delay 2 "${base%/}/$path" -o /dev/null
+              wait_url "${base%/}/$path"
             done
           done
 
           if [ "${{ steps.diff.outcome }}" = "success" ]; then
-            curl --fail --show-error --location --retry 10 --retry-delay 2 "${LATEST_URL%/}/diff/index.html" -o /dev/null
+            wait_url "${LATEST_URL%/}/diff/index.html"
           fi
 
       - name: Create or update PR Preview 2 comment
