@@ -369,18 +369,24 @@ jobs:
           if ! git -C pages diff --cached --quiet; then
             git -C pages commit -m "Add diff for PR #$PR_NUMBER at ${HEAD_SHA:0:12}"
 
+            pushed=0
             for attempt in 1 2 3; do
               if git -C pages push origin HEAD:gh-pages; then
+                pushed=1
                 break
               fi
               echo "Diff push attempt $attempt failed; rebasing on current gh-pages"
               git -C pages fetch origin gh-pages
               git -C pages rebase origin/gh-pages
+
+              CHANGED="$(git -C pages diff-tree --no-commit-id --name-only -r HEAD)"
+              if [ -n "$CHANGED" ] && grep -Ev "^pr-preview/$PR_NUMBER/" <<<"$CHANGED" >/dev/null; then
+                echo "Diff commit scope violation after rebase" >&2
+                exit 1
+              fi
             done
 
-            if ! git -C pages merge-base --is-ancestor HEAD origin/gh-pages 2>/dev/null; then
-              git -C pages fetch origin gh-pages
-            fi
+            test "$pushed" = 1
           fi
 
       - name: Refresh archive after optional diff
