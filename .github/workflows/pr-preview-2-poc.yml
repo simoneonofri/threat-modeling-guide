@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   preview:
-    uses: simoneonofri/pr-preview-2/.github/workflows/build.yml@v0.1.0-alpha.1
+    uses: simoneonofri/pr-preview-2/.github/workflows/build.yml@main
     with:
       toolchain: bikeshed
       source: index.bs
