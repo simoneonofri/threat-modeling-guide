@@ -1,0 +1,250 @@
+name: PR Preview 2 PoC
+
+on:
+  push:
+    branches:
+      - pr-preview-2-poc
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  pages: write
+  id-token: write
+
+env:
+  BASE_SHA: 043b0eaefd79f862238f9936b6f1ec7cd054b75b
+  HEAD_SHA: ff57fa6c99fb527b724a69373b2e30fb2f8fd635
+
+jobs:
+  build-base:
+    name: Build BASE with spec-prod
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout BASE
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE_SHA }}
+
+      - name: Build BASE
+        uses: w3c/spec-prod@v2
+        with:
+          TOOLCHAIN: bikeshed
+          SOURCE: index.bs
+          ARTIFACT_NAME: pr-preview-2-base
+          BUILD_FAIL_ON: nothing
+          VALIDATE_MARKUP: "false"
+          VALIDATE_WEBIDL: "false"
+          VALIDATE_LINKS: "false"
+
+  build-head:
+    name: Build HEAD with spec-prod
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout HEAD
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.HEAD_SHA }}
+
+      - name: Build HEAD
+        uses: w3c/spec-prod@v2
+        with:
+          TOOLCHAIN: bikeshed
+          SOURCE: index.bs
+          ARTIFACT_NAME: pr-preview-2-head
+          BUILD_FAIL_ON: nothing
+          VALIDATE_MARKUP: "false"
+          VALIDATE_WEBIDL: "false"
+          VALIDATE_LINKS: "false"
+
+  assemble-stage1:
+    name: Assemble BASE and HEAD
+    runs-on: ubuntu-latest
+    needs:
+      - build-base
+      - build-head
+    steps:
+      - name: Download BASE
+        uses: actions/download-artifact@v4
+        with:
+          name: pr-preview-2-base
+          path: site/base
+
+      - name: Download HEAD
+        uses: actions/download-artifact@v4
+        with:
+          name: pr-preview-2-head
+          path: site/head
+
+      - name: Create landing page
+        shell: bash
+        run: |
+          set -euo pipefail
+          touch site/.nojekyll
+          cat > site/index.html <<EOF
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>PR Preview 2 PoC</title>
+          <h1>PR Preview 2 PoC</h1>
+          <p>Repository: simoneonofri/threat-modeling-guide</p>
+          <p>BASE: <code>${BASE_SHA}</code></p>
+          <p>HEAD: <code>${HEAD_SHA}</code></p>
+          <ul>
+            <li><a href="./base/index.html">BASE preview</a></li>
+            <li><a href="./head/index.html">HEAD preview</a></li>
+          </ul>
+          <p>The diff is generated after these two snapshots become publicly reachable.</p>
+          EOF
+          echo "BASE files:"
+          find site/base -maxdepth 3 -type f | sort
+          echo "HEAD files:"
+          find site/head -maxdepth 3 -type f | sort
+          test -f site/base/index.html
+          test -f site/head/index.html
+          test -f site/base/images/minimalist-web-threat-model.png
+          test -f site/head/images/minimalist-web-threat-model.png
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload stage 1 Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          name: pr-preview-2-stage1
+          path: site
+          retention-days: 1
+
+  deploy-stage1:
+    name: Publish BASE and HEAD
+    runs-on: ubuntu-latest
+    needs: assemble-stage1
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy stage 1
+        id: deployment
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: pr-preview-2-stage1
+
+  build-diff:
+    name: Generate W3C HTML Diff
+    runs-on: ubuntu-latest
+    needs:
+      - build-base
+      - build-head
+      - deploy-stage1
+    steps:
+      - name: Download BASE
+        uses: actions/download-artifact@v4
+        with:
+          name: pr-preview-2-base
+          path: site/base
+
+      - name: Download HEAD
+        uses: actions/download-artifact@v4
+        with:
+          name: pr-preview-2-head
+          path: site/head
+
+      - name: Fetch W3C HTML Diff
+        env:
+          PAGE_URL: ${{ needs.deploy-stage1.outputs.page_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_URL="${PAGE_URL%/}/base/index.html"
+          HEAD_URL="${PAGE_URL%/}/head/index.html"
+
+          echo "Waiting for published snapshots:"
+          echo "  BASE: $BASE_URL"
+          echo "  HEAD: $HEAD_URL"
+
+          for url in "$BASE_URL" "$HEAD_URL"; do
+            ok=0
+            for attempt in {1..20}; do
+              if curl --fail --silent --show-error --location "$url" -o /dev/null; then
+                ok=1
+                break
+              fi
+              sleep 3
+            done
+            test "$ok" = 1
+          done
+
+          mkdir -p site/diff
+          DIFF_URL=$(python3 - "$BASE_URL" "$HEAD_URL" <<'PY'
+          import sys
+          import urllib.parse
+          base, head = sys.argv[1:3]
+          print("https://services.w3.org/htmldiff?" + urllib.parse.urlencode({
+              "doc1": base,
+              "doc2": head,
+          }))
+          PY
+          )
+          echo "Diff service: $DIFF_URL"
+          curl --fail --show-error --location --retry 3 "$DIFF_URL" -o site/diff/index.html
+          test -s site/diff/index.html
+
+          touch site/.nojekyll
+          cat > site/index.html <<EOF
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>PR Preview 2 PoC</title>
+          <h1>PR Preview 2 PoC</h1>
+          <p>Repository: simoneonofri/threat-modeling-guide</p>
+          <p>BASE: <code>${BASE_SHA}</code></p>
+          <p>HEAD: <code>${HEAD_SHA}</code></p>
+          <ul>
+            <li><a href="./base/index.html">BASE preview</a></li>
+            <li><a href="./head/index.html">HEAD preview</a></li>
+            <li><a href="./diff/index.html">W3C HTML Diff</a></li>
+          </ul>
+          EOF
+
+      - name: Upload final Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          name: pr-preview-2-final
+          path: site
+          retention-days: 1
+
+  deploy-final:
+    name: Publish final PoC
+    runs-on: ubuntu-latest
+    needs: build-diff
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy final site
+        id: deployment
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: pr-preview-2-final
+
+  verify:
+    name: Verify published PoC
+    runs-on: ubuntu-latest
+    needs: deploy-final
+    steps:
+      - name: Verify HTML, diff and image
+        env:
+          PAGE_URL: ${{ needs.deploy-final.outputs.page_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for path in             ""             "base/index.html"             "head/index.html"             "diff/index.html"             "base/images/minimalist-web-threat-model.png"             "head/images/minimalist-web-threat-model.png"
+          do
+            url="${PAGE_URL%/}/$path"
+            echo "Checking $url"
+            curl --fail --show-error --location --retry 5 --retry-delay 2 "$url" -o /dev/null
+          done
+          echo "PR Preview 2 PoC: all checks passed."
+          echo "Published at: $PAGE_URL" >> "$GITHUB_STEP_SUMMARY"
