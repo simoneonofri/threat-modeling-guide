@@ -2484,4 +2484,4 @@ helps that decision [[SHOSTACK-RISK-TM]].
 
 ## PR Preview 2 Split-Pipeline Test {#pr-preview-2-split-test}
 
-This temporary section exists only in the `simoneonofri` proof-of-concept branch to verify the read-only build and trusted publisher split. This second revision checks immutable history.
+This temporary section exists only in the `simoneonofri` proof-of-concept branch to verify the read-only build and trusted publisher split. This second revision checks immutable history. This third revision verifies the hardened publisher.
