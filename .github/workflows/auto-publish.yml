@@ -7,6 +7,9 @@ jobs:
   main:
     name: Build, Validate and Deploy
     runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.event_name == 'push' && format('pr-preview-pages-{0}', github.repository_id) || format('spec-ci-{0}-{1}', github.repository_id, github.run_id) }}
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
