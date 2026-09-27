@@ -1,37 +1,76 @@
 name: PR Preview 2 PoC
 
 on:
-  push:
+  pull_request:
     branches:
       - pr-preview-2-poc
-  workflow_dispatch:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - closed
+
+concurrency:
+  group: pr-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
   actions: read
-  pages: write
-  id-token: write
-
-env:
-  BASE_SHA: 043b0eaefd79f862238f9936b6f1ec7cd054b75b
-  HEAD_SHA: ff57fa6c99fb527b724a69373b2e30fb2f8fd635
+  pull-requests: write
+  issues: write
 
 jobs:
-  build-base:
-    name: Build BASE with spec-prod
+  resolve:
+    name: Resolve PR revisions
+    if: github.event.action != 'closed'
     runs-on: ubuntu-latest
+    outputs:
+      merge_base: ${{ steps.refs.outputs.merge_base }}
+      head_sha: ${{ steps.refs.outputs.head_sha }}
+      pr_number: ${{ steps.refs.outputs.pr_number }}
     steps:
-      - name: Checkout BASE
+      - name: Checkout PR HEAD
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.BASE_SHA }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Resolve merge-base
+        id: refs
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          git fetch origin "$BASE_SHA"
+          MERGE_BASE="$(git merge-base "$HEAD_SHA" "$BASE_SHA")"
+          echo "merge_base=$MERGE_BASE" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "BASE tip:   $BASE_SHA"
+          echo "Merge-base: $MERGE_BASE"
+          echo "HEAD:       $HEAD_SHA"
+
+  build-base:
+    name: Build BASE with spec-prod
+    if: github.event.action != 'closed'
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout merge-base
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.merge_base }}
 
       - name: Build BASE
         uses: w3c/spec-prod@v2
         with:
           TOOLCHAIN: bikeshed
           SOURCE: index.bs
-          ARTIFACT_NAME: pr-preview-2-base
+          ARTIFACT_NAME: pr-preview-2-base-${{ github.event.pull_request.number }}
           BUILD_FAIL_ON: nothing
           VALIDATE_MARKUP: "false"
           VALIDATE_WEBIDL: "false"
@@ -39,144 +78,148 @@ jobs:
 
   build-head:
     name: Build HEAD with spec-prod
+    if: github.event.action != 'closed'
+    needs: resolve
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout HEAD
+      - name: Checkout PR HEAD
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.HEAD_SHA }}
+          ref: ${{ needs.resolve.outputs.head_sha }}
 
       - name: Build HEAD
         uses: w3c/spec-prod@v2
         with:
           TOOLCHAIN: bikeshed
           SOURCE: index.bs
-          ARTIFACT_NAME: pr-preview-2-head
+          ARTIFACT_NAME: pr-preview-2-head-${{ github.event.pull_request.number }}
           BUILD_FAIL_ON: nothing
           VALIDATE_MARKUP: "false"
           VALIDATE_WEBIDL: "false"
           VALIDATE_LINKS: "false"
 
-  assemble-stage1:
-    name: Assemble BASE and HEAD
-    runs-on: ubuntu-latest
+  publish:
+    name: Publish PR preview
+    if: github.event.action != 'closed'
     needs:
+      - resolve
       - build-base
       - build-head
+    runs-on: ubuntu-latest
+    env:
+      PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
+      HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+      MERGE_BASE: ${{ needs.resolve.outputs.merge_base }}
+      SITE_ORIGIN: https://simoneonofri.github.io/threat-modeling-guide
+      GH_TOKEN: ${{ github.token }}
     steps:
+      - name: Checkout persistent Pages branch
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: pages
+          fetch-depth: 0
+
       - name: Download BASE
         uses: actions/download-artifact@v4
         with:
-          name: pr-preview-2-base
-          path: site/base
+          name: pr-preview-2-base-${{ github.event.pull_request.number }}
+          path: build/base
 
       - name: Download HEAD
         uses: actions/download-artifact@v4
         with:
-          name: pr-preview-2-head
-          path: site/head
+          name: pr-preview-2-head-${{ github.event.pull_request.number }}
+          path: build/head
 
-      - name: Create landing page
+      - name: Publish immutable snapshot and latest
+        id: stage1
         shell: bash
         run: |
           set -euo pipefail
-          touch site/.nojekyll
-          cat > site/index.html <<EOF
+          PREFIX="pr-preview/$PR_NUMBER"
+          SNAPSHOT="$PREFIX/$HEAD_SHA"
+          ROOT_BEFORE="$(git -C pages hash-object index.html)"
+
+          rm -rf "pages/$SNAPSHOT"
+          mkdir -p "pages/$SNAPSHOT/base" "pages/$SNAPSHOT/head"
+          cp -a build/base/. "pages/$SNAPSHOT/base/"
+          cp -a build/head/. "pages/$SNAPSHOT/head/"
+
+          cat > "pages/$SNAPSHOT/index.html" <<EOF
           <!doctype html>
           <meta charset="utf-8">
-          <title>PR Preview 2 PoC</title>
-          <h1>PR Preview 2 PoC</h1>
-          <p>Repository: simoneonofri/threat-modeling-guide</p>
-          <p>BASE: <code>${BASE_SHA}</code></p>
-          <p>HEAD: <code>${HEAD_SHA}</code></p>
+          <title>PR #$PR_NUMBER preview</title>
+          <h1>PR #$PR_NUMBER</h1>
+          <p>Merge-base: <code>$MERGE_BASE</code></p>
+          <p>HEAD: <code>$HEAD_SHA</code></p>
           <ul>
-            <li><a href="./base/index.html">BASE preview</a></li>
-            <li><a href="./head/index.html">HEAD preview</a></li>
+            <li><a href="./base/index.html">BASE</a></li>
+            <li><a href="./head/index.html">HEAD</a></li>
           </ul>
-          <p>The diff is generated after these two snapshots become publicly reachable.</p>
           EOF
-          echo "BASE files:"
-          find site/base -maxdepth 3 -type f | sort
-          echo "HEAD files:"
-          find site/head -maxdepth 3 -type f | sort
-          test -f site/base/index.html
-          test -f site/head/index.html
-          test -f site/base/images/minimalist-web-threat-model.png
-          test -f site/head/images/minimalist-web-threat-model.png
 
-      - name: Configure Pages
-        uses: actions/configure-pages@v5
+          rm -rf "pages/$PREFIX/latest"
+          cp -a "pages/$SNAPSHOT" "pages/$PREFIX/latest"
 
-      - name: Upload stage 1 Pages artifact
-        uses: actions/upload-pages-artifact@v4
-        with:
-          name: pr-preview-2-stage1
-          path: site
-          retention-days: 1
+          test -f "pages/$SNAPSHOT/base/index.html"
+          test -f "pages/$SNAPSHOT/head/index.html"
+          test -f "pages/$SNAPSHOT/base/images/minimalist-web-threat-model.png"
+          test -f "pages/$SNAPSHOT/head/images/minimalist-web-threat-model.png"
 
-  deploy-stage1:
-    name: Publish BASE and HEAD
-    runs-on: ubuntu-latest
-    needs: assemble-stage1
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    outputs:
-      page_url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy stage 1
-        id: deployment
-        uses: actions/deploy-pages@v4
-        with:
-          artifact_name: pr-preview-2-stage1
+          ROOT_AFTER="$(git -C pages hash-object index.html)"
+          test "$ROOT_BEFORE" = "$ROOT_AFTER"
 
-  build-diff:
-    name: Generate W3C HTML Diff
-    runs-on: ubuntu-latest
-    needs:
-      - build-base
-      - build-head
-      - deploy-stage1
-    steps:
-      - name: Download BASE
-        uses: actions/download-artifact@v4
-        with:
-          name: pr-preview-2-base
-          path: site/base
+          git -C pages config user.name "github-actions[bot]"
+          git -C pages config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C pages add -- "$PREFIX"
 
-      - name: Download HEAD
-        uses: actions/download-artifact@v4
-        with:
-          name: pr-preview-2-head
-          path: site/head
+          if git -C pages diff --cached --quiet; then
+            echo "No stage-1 changes to publish."
+          else
+            if git -C pages diff --cached --name-only | grep -Ev "^pr-preview/$PR_NUMBER/" >/dev/null; then
+              echo "Refusing to modify anything outside pr-preview/$PR_NUMBER/" >&2
+              exit 1
+            fi
+            git -C pages commit -m "Preview PR #$PR_NUMBER at ${HEAD_SHA:0:12}"
+            git -C pages push origin gh-pages
+          fi
 
-      - name: Fetch W3C HTML Diff
-        env:
-          PAGE_URL: ${{ needs.deploy-stage1.outputs.page_url }}
+          echo "snapshot_url=$SITE_ORIGIN/$SNAPSHOT/" >> "$GITHUB_OUTPUT"
+          echo "latest_url=$SITE_ORIGIN/$PREFIX/latest/" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for BASE and HEAD on Pages
         shell: bash
+        env:
+          SNAPSHOT_URL: ${{ steps.stage1.outputs.snapshot_url }}
         run: |
           set -euo pipefail
-          BASE_URL="${PAGE_URL%/}/base/index.html"
-          HEAD_URL="${PAGE_URL%/}/head/index.html"
-
-          echo "Waiting for published snapshots:"
-          echo "  BASE: $BASE_URL"
-          echo "  HEAD: $HEAD_URL"
-
-          for url in "$BASE_URL" "$HEAD_URL"; do
+          for path in base/index.html head/index.html; do
+            url="${SNAPSHOT_URL%/}/$path"
             ok=0
-            for attempt in {1..20}; do
+            for attempt in {1..30}; do
               if curl --fail --silent --show-error --location "$url" -o /dev/null; then
                 ok=1
                 break
               fi
-              sleep 3
+              sleep 4
             done
             test "$ok" = 1
           done
 
-          mkdir -p site/diff
-          DIFF_URL=$(python3 - "$BASE_URL" "$HEAD_URL" <<'PY'
+      - name: Generate W3C HTML Diff and finalize snapshot
+        shell: bash
+        env:
+          SNAPSHOT_URL: ${{ steps.stage1.outputs.snapshot_url }}
+        run: |
+          set -euo pipefail
+          PREFIX="pr-preview/$PR_NUMBER"
+          SNAPSHOT="$PREFIX/$HEAD_SHA"
+          BASE_URL="${SNAPSHOT_URL%/}/base/index.html"
+          HEAD_URL="${SNAPSHOT_URL%/}/head/index.html"
+          ROOT_BEFORE="$(git -C pages hash-object index.html)"
+
+          DIFF_URL="$(python3 - "$BASE_URL" "$HEAD_URL" <<'PY'
           import sys
           import urllib.parse
           base, head = sys.argv[1:3]
@@ -185,66 +228,118 @@ jobs:
               "doc2": head,
           }))
           PY
-          )
-          echo "Diff service: $DIFF_URL"
-          curl --fail --show-error --location --retry 3 "$DIFF_URL" -o site/diff/index.html
-          test -s site/diff/index.html
+          )"
 
-          touch site/.nojekyll
-          cat > site/index.html <<EOF
-          <!doctype html>
-          <meta charset="utf-8">
-          <title>PR Preview 2 PoC</title>
-          <h1>PR Preview 2 PoC</h1>
-          <p>Repository: simoneonofri/threat-modeling-guide</p>
-          <p>BASE: <code>${BASE_SHA}</code></p>
-          <p>HEAD: <code>${HEAD_SHA}</code></p>
-          <ul>
-            <li><a href="./base/index.html">BASE preview</a></li>
-            <li><a href="./head/index.html">HEAD preview</a></li>
-            <li><a href="./diff/index.html">W3C HTML Diff</a></li>
-          </ul>
-          EOF
+          mkdir -p "pages/$SNAPSHOT/diff"
+          curl --fail --show-error --location --retry 3 "$DIFF_URL" -o "pages/$SNAPSHOT/diff/index.html"
+          test -s "pages/$SNAPSHOT/diff/index.html"
 
-      - name: Upload final Pages artifact
-        uses: actions/upload-pages-artifact@v4
-        with:
-          name: pr-preview-2-final
-          path: site
-          retention-days: 1
+          python3 - "pages/$SNAPSHOT/index.html" <<'PY'
+          from pathlib import Path
+          import sys
+          p = Path(sys.argv[1])
+          s = p.read_text()
+          s = s.replace("</ul>", '  <li><a href="./diff/index.html">DIFF</a></li>\n</ul>')
+          p.write_text(s)
+          PY
 
-  deploy-final:
-    name: Publish final PoC
-    runs-on: ubuntu-latest
-    needs: build-diff
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    outputs:
-      page_url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy final site
-        id: deployment
-        uses: actions/deploy-pages@v4
-        with:
-          artifact_name: pr-preview-2-final
+          rm -rf "pages/$PREFIX/latest"
+          cp -a "pages/$SNAPSHOT" "pages/$PREFIX/latest"
 
-  verify:
-    name: Verify published PoC
-    runs-on: ubuntu-latest
-    needs: deploy-final
-    steps:
-      - name: Verify HTML, diff and image
+          ROOT_AFTER="$(git -C pages hash-object index.html)"
+          test "$ROOT_BEFORE" = "$ROOT_AFTER"
+
+          git -C pages add -- "$PREFIX"
+          if git -C pages diff --cached --name-only | grep -Ev "^pr-preview/$PR_NUMBER/" >/dev/null; then
+            echo "Refusing to modify anything outside pr-preview/$PR_NUMBER/" >&2
+            exit 1
+          fi
+          if ! git -C pages diff --cached --quiet; then
+            git -C pages commit -m "Add diff for PR #$PR_NUMBER at ${HEAD_SHA:0:12}"
+            git -C pages push origin gh-pages
+          fi
+
+      - name: Verify published snapshot
+        shell: bash
         env:
-          PAGE_URL: ${{ needs.deploy-final.outputs.page_url }}
+          SNAPSHOT_URL: ${{ steps.stage1.outputs.snapshot_url }}
+          LATEST_URL: ${{ steps.stage1.outputs.latest_url }}
+        run: |
+          set -euo pipefail
+          for base in "$SNAPSHOT_URL" "$LATEST_URL"; do
+            for path in               ""               "base/index.html"               "head/index.html"               "diff/index.html"               "head/images/minimalist-web-threat-model.png"
+            do
+              url="${base%/}/$path"
+              echo "Checking $url"
+              curl --fail --show-error --location --retry 10 --retry-delay 3 "$url" -o /dev/null
+            done
+          done
+
+      - name: Create or update PR Preview 2 comment
+        shell: bash
+        env:
+          LATEST_URL: ${{ steps.stage1.outputs.latest_url }}
+          SNAPSHOT_URL: ${{ steps.stage1.outputs.snapshot_url }}
+        run: |
+          set -euo pipefail
+          MARKER="<!-- pr-preview-2 -->"
+          BODY="$MARKER
+          **PR Preview 2**
+          
+          - [Preview](${LATEST_URL%/}/head/index.html)
+          - [Diff](${LATEST_URL%/}/diff/index.html)
+          - [BASE](${LATEST_URL%/}/base/index.html)
+          - [Immutable snapshot]($SNAPSHOT_URL)
+          
+          HEAD: \`$HEAD_SHA\`  
+          Merge-base: \`$MERGE_BASE\`"
+
+          COMMENT_ID="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate             --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | contains("<!-- pr-preview-2 -->"))) | .id'             | tail -n 1)"
+
+          if [ -n "$COMMENT_ID" ]; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID" -f body="$BODY" >/dev/null
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -f body="$BODY" >/dev/null
+          fi
+
+  cleanup:
+    name: Remove preview after PR closes
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout persistent Pages branch
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: pages
+          fetch-depth: 0
+
+      - name: Remove only this PR preview
         shell: bash
         run: |
           set -euo pipefail
-          for path in             ""             "base/index.html"             "head/index.html"             "diff/index.html"             "base/images/minimalist-web-threat-model.png"             "head/images/minimalist-web-threat-model.png"
-          do
-            url="${PAGE_URL%/}/$path"
-            echo "Checking $url"
-            curl --fail --show-error --location --retry 5 --retry-delay 2 "$url" -o /dev/null
-          done
-          echo "PR Preview 2 PoC: all checks passed."
-          echo "Published at: $PAGE_URL" >> "$GITHUB_STEP_SUMMARY"
+          PREFIX="pr-preview/$PR_NUMBER"
+          ROOT_BEFORE="$(git -C pages hash-object index.html)"
+
+          if [ -d "pages/$PREFIX" ]; then
+            rm -rf "pages/$PREFIX"
+            git -C pages config user.name "github-actions[bot]"
+            git -C pages config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git -C pages add -A -- "$PREFIX"
+
+            ROOT_AFTER="$(git -C pages hash-object index.html)"
+            test "$ROOT_BEFORE" = "$ROOT_AFTER"
+
+            if git -C pages diff --cached --name-only | grep -Ev "^pr-preview/$PR_NUMBER/" >/dev/null; then
+              echo "Refusing to modify anything outside pr-preview/$PR_NUMBER/" >&2
+              exit 1
+            fi
+
+            if ! git -C pages diff --cached --quiet; then
+              git -C pages commit -m "Remove preview for PR #$PR_NUMBER"
+              git -C pages push origin gh-pages
+            fi
+          fi
