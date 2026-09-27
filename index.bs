@@ -2484,6 +2484,6 @@ helps that decision [[SHOSTACK-RISK-TM]].
 
 ## PR Preview 2 Packaged Test {#pr-preview-2-packaged-test}
 
-This temporary section exists only in the `simoneonofri` fork to verify the packaged PR Preview 2 reusable workflows on Bikeshed, pinned to alpha.2.
+This temporary section exists only in the `simoneonofri` fork to verify the packaged PR Preview 2 reusable workflows on Bikeshed, pinned to alpha.2, after the final package check.
 
 <img src="pr-preview-2-packaged-test.svg" alt="PR Preview 2 packaged Bikeshed test">
