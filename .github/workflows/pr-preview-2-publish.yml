@@ -40,11 +40,21 @@ jobs:
           RUN_JSON="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID")"
           PR_NUMBER="$(jq -r '.pull_requests[0].number // empty' <<<"$RUN_JSON")"
           RUN_HEAD_SHA="$(jq -r '.head_sha // empty' <<<"$RUN_JSON")"
+          RUN_HEAD_BRANCH="$(jq -r '.head_branch // empty' <<<"$RUN_JSON")"
+          RUN_HEAD_REPO="$(jq -r '.head_repository.full_name // empty' <<<"$RUN_JSON")"
 
           [[ "$RUN_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
 
           if [[ ! "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
             PRS_JSON="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RUN_HEAD_SHA/pulls")"
+            PR_NUMBER="$(jq -r --arg repo "$GITHUB_REPOSITORY" --arg sha "$RUN_HEAD_SHA"               '[.[] | select(.base.repo.full_name == $repo and .head.sha == $sha)] | sort_by(.number) | last | .number // empty'               <<<"$PRS_JSON")"
+          fi
+
+          if [[ ! "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            [[ "$RUN_HEAD_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+            test -n "$RUN_HEAD_BRANCH"
+            RUN_HEAD_OWNER="${RUN_HEAD_REPO%%/*}"
+            PRS_JSON="$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls"               -f state=closed               -f head="$RUN_HEAD_OWNER:$RUN_HEAD_BRANCH"               -f per_page=100)"
             PR_NUMBER="$(jq -r --arg repo "$GITHUB_REPOSITORY" --arg sha "$RUN_HEAD_SHA"               '[.[] | select(.base.repo.full_name == $repo and .head.sha == $sha)] | sort_by(.number) | last | .number // empty'               <<<"$PRS_JSON")"
           fi
 
